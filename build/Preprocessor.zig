@@ -1,6 +1,7 @@
 const std = @import("std");
 const debug = std.debug;
 const mem = std.mem;
+const Io = std.Io;
 
 // This tool is used to preprocess the sqlite3 headers to make them usable to build loadable extensions.
 //
@@ -24,13 +25,14 @@ const mem = std.mem;
 // This works but it requires fairly extensive modifications of both sqlite3.h and sqlite3ext.h which is time consuming to do manually;
 // this tool is intended to automate all these modifications.
 
-fn readOriginalData(allocator: mem.Allocator, path: []const u8) ![]const u8 {
-    var file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+fn readOriginalData(io: Io, allocator: mem.Allocator, path: []const u8) ![]const u8 {
+    const dir = Io.Dir.cwd();
+    const file = try Io.Dir.openFile(dir, io, path, .{});
+    defer Io.File.close(file, io);
     var buf: [1024]u8 = undefined;
-    var reader = file.reader(&buf);
+    var reader = Io.File.reader(file, io, &buf);
 
-    const data = reader.interface.readAlloc(allocator, 1024 * 1024);
+    const data = try reader.interface.readAlloc(allocator, 1024 * 1024);
     return data;
 }
 
@@ -153,8 +155,8 @@ const Processor = struct {
     }
 };
 
-pub fn sqlite3(allocator: mem.Allocator, input_path: []const u8, output_path: []const u8) !void {
-    const data = try readOriginalData(allocator, input_path);
+pub fn sqlite3(io: Io, allocator: mem.Allocator, input_path: []const u8, output_path: []const u8) !void {
+    const data = try readOriginalData(io, allocator, input_path);
 
     var processor = try Processor.init(allocator, data);
 
@@ -192,17 +194,18 @@ pub fn sqlite3(allocator: mem.Allocator, input_path: []const u8, output_path: []
 
     // Write the result
 
-    var output_file = try std.fs.cwd().createFile(output_path, .{ .mode = 0o0644 });
-    defer output_file.close();
+    const dir = Io.Dir.cwd();
+    const output_file = try Io.Dir.createFile(dir, io, output_path, .{});
+    defer Io.File.close(output_file, io);
 
-    try output_file.writeAll("/* sqlite3.h edited by the zig-sqlite build script */\n");
     var buf: [1024]u8 = undefined;
-    var out_writer = output_file.writer(&buf);
+    var out_writer = Io.File.writer(output_file, io, &buf);
+    try out_writer.interface.writeAll("/* sqlite3.h edited by the zig-sqlite build script */\n");
     try processor.dump(&out_writer);
 }
 
-pub fn sqlite3ext(allocator: mem.Allocator, input_path: []const u8, output_path: []const u8) !void {
-    const data = try readOriginalData(allocator, input_path);
+pub fn sqlite3ext(io: Io, allocator: mem.Allocator, input_path: []const u8, output_path: []const u8) !void {
+    const data = try readOriginalData(io, allocator, input_path);
 
     var processor = try Processor.init(allocator, data);
 
@@ -230,11 +233,12 @@ pub fn sqlite3ext(allocator: mem.Allocator, input_path: []const u8, output_path:
 
     // Write the result
 
-    var output_file = try std.fs.cwd().createFile(output_path, .{ .mode = 0o0644 });
-    defer output_file.close();
+    const dir = Io.Dir.cwd();
+    const output_file = try Io.Dir.createFile(dir, io, output_path, .{});
+    defer Io.File.close(output_file, io);
 
-    try output_file.writeAll("/* sqlite3ext.h edited by the zig-sqlite build script */\n");
     var buf: [1024]u8 = undefined;
-    var out_writer = output_file.writer(&buf);
+    var out_writer = Io.File.writer(output_file, io, &buf);
+    try out_writer.interface.writeAll("/* sqlite3ext.h edited by the zig-sqlite build script */\n");
     try processor.dump(&out_writer);
 }
