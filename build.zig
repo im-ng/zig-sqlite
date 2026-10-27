@@ -109,8 +109,24 @@ fn computeTestTargets(isNative: bool, ci: ?bool) ?[]const TestTarget {
 }
 
 // This creates a SQLite static library from the SQLite dependency code.
-fn makeSQLiteLib(b: *std.Build, dep: *std.Build.Dependency, c_flags: []const []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite_c: enum { with, without }) *std.Build.Step.Compile {
-    const mod = b.addModule("lib-sqlite", .{
+
+// Generates a Zig module with the C decls translated from a wrapper header
+// living under c/, using the vendored translate-c Translator.
+fn genBindings(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize, comptime name: []const u8, comptime header: []const u8, amalgamation_root: std.Build.LazyPath) *std.Build.Module {
+    const translator_dep = b.dependency("translate_c", .{});
+    var t = @import("translate_c").Translator.init(translator_dep, .{
+        .name = name,
+        .c_source_file = b.path("c/" ++ header),
+        .target = target,
+        .optimize = optimize,
+    });
+    t.addIncludePath(b.path("c"));
+    t.addIncludePath(amalgamation_root);
+    return t.mod;
+}
+
+fn makeSQLiteLib(b: *std.Build, dep: *std.Build.Dependency, c_flags: []const []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize, sqlite_c: enum { with, without }) *std.Build.Step.Compile {
+    const mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -158,19 +174,26 @@ pub fn build(b: *std.Build) !void {
     defer flags.deinit(b.allocator);
     try flags.append(b.allocator, "-std=c99");
 
-    inline for (std.meta.fields(EnableOptions)) |field| {
-        const opt = b.option(bool, field.name, "Enable " ++ field.name) orelse field.defaultValue().?;
+    const info = @typeInfo(EnableOptions).@"struct";
+    inline for (info.field_names, info.field_types, info.field_attrs) |name, FT, attrs| {
+        const opt = b.option(bool, name, "Enable " ++ name) orelse attrs.defaultValue(FT).?;
 
         if (opt) {
-            var buf: [field.name.len]u8 = undefined;
-            const name = std.ascii.upperString(&buf, field.name);
-            const flag = try std.fmt.allocPrint(b.allocator, "-DSQLITE_ENABLE_{s}", .{name});
+            var buf: [name.len]u8 = undefined;
+            const upper = std.ascii.upperString(&buf, name);
+            const flag = try std.fmt.allocPrint(b.allocator, "-DSQLITE_ENABLE_{s}", .{upper});
 
             try flags.append(b.allocator, flag);
         }
     }
 
     const c_flags = flags.items;
+
+    // 0.17 removed `@cImport` from the language, so the sqlite3 / sqlite3ext
+    // bindings are generated at build time with the vendored translate-c
+    // Translator and injected as imports on the sqlite + sqliteext modules.
+    const sqlite_c_bindings = genBindings(b, target, optimize, "sqlite_c", "bindings.h", sqlite_dep.path("."));
+    const loadable_c_bindings = genBindings(b, target, optimize, "loadable_c", "loadable_bindings.h", sqlite_dep.path("."));
 
     //
     // Main library and module
@@ -181,9 +204,14 @@ pub fn build(b: *std.Build) !void {
         const lib = makeSQLiteLib(b, sqlite_dep, c_flags, target, optimize, .with);
 
         const mod = b.addModule("sqlite", .{
-            .root_source_file = b.path("sqlite.zig"),
-            .link_libc = true,
-        });
+        .root_source_file = b.path("sqlite.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sqlite_c", .module = sqlite_c_bindings },
+            .{ .name = "loadable_c", .module = loadable_c_bindings },
+        },
+    });
         mod.addIncludePath(b.path("c"));
         mod.addIncludePath(sqlite_dep.path("."));
         mod.linkLibrary(lib);
@@ -199,6 +227,10 @@ pub fn build(b: *std.Build) !void {
         const mod = b.addModule("sqliteext", .{
             .root_source_file = b.path("sqlite.zig"),
             .link_libc = true,
+            .imports = &.{
+                .{ .name = "sqlite_c", .module = sqlite_c_bindings },
+                .{ .name = "loadable_c", .module = loadable_c_bindings },
+            },
         });
         mod.addIncludePath(b.path("c"));
         mod.linkLibrary(lib);
@@ -290,7 +322,7 @@ fn addPreprocessStep(b: *std.Build, sqlite_dep: *std.Build.Dependency) !void {
     preprocess_headers.dependOn(&w.step);
 }
 
-fn addZigcrypto(b: *std.Build, sqlite_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.InstallArtifact {
+fn addZigcrypto(b: *std.Build, sqlite_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize) *std.Build.Step.InstallArtifact {
     const mod = b.addModule("zigcryto", .{
         .root_source_file = b.path("examples/zigcrypto.zig"),
         .target = getTarget(target),
@@ -310,7 +342,7 @@ fn addZigcrypto(b: *std.Build, sqlite_mod: *std.Build.Module, target: std.Build.
     return install_artifact;
 }
 
-fn addZigcryptoTestRun(b: *std.Build, sqlite_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Run {
+fn addZigcryptoTestRun(b: *std.Build, sqlite_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize) *std.Build.Step.Run {
     const mod = b.addModule("zigcryto-test", .{
         .root_source_file = b.path("examples/zigcrypto_test.zig"),
         .target = getTarget(target),
@@ -352,10 +384,9 @@ const PreprocessStep = struct {
         const step = owner.allocator.create(PreprocessStep) catch @panic("OOM");
         step.* = .{
             .step = std.Build.Step.init(.{
-                .id = std.Build.Step.Id.custom,
+                .tag = .top_level,
                 .name = "preprocess",
                 .owner = owner,
-                .makeFn = make,
             }),
             .source = config.source,
             .target = config.target,
