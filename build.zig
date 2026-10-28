@@ -263,7 +263,7 @@ pub fn build(b: *std.Build) !void {
 
         const test_sqlite_lib = makeSQLiteLib(b, sqlite_dep, c_flags, cross_target, optimize, .with);
 
-        const mod = b.addModule(test_name, .{
+        const mod = b.createModule(.{
             .target = cross_target,
             .optimize = optimize,
             .root_source_file = b.path("sqlite.zig"),
