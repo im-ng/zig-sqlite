@@ -1,7 +1,6 @@
-pub const c = @cImport({
-    @cInclude("loadable-ext-sqlite3ext.h");
-    @cInclude("workaround.h");
-});
+// Bindings for the preprocessed loadable-extension headers, generated at
+// build time by the translate-c Translator (see build.zig).
+pub const c = @import("loadable_c");
 
 pub var sqlite3_api: [*c]c.sqlite3_api_routines = null;
 
